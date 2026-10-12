@@ -1,0 +1,81 @@
+# ==============================
+
+# Build output
+
+# ==============================
+
+build/
+cmake-build-*/
+
+# ==============================
+
+# CMake generated files
+
+# ==============================
+
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+compile_commands.json
+CTestTestfile.cmake
+Testing/
+
+# ==============================
+
+# Compiled objects and libraries
+
+# ==============================
+
+*.o
+*.obj
+*.a
+*.so
+*.so.*
+*.dll
+*.exe
+*.out
+
+# ==============================
+
+# Backup files
+
+# ==============================
+
+*.usb_pass
+*.tcp_usb_step*
+*.tcp_pass_step*
+*.usb_pass_step*
+*.bak
+*.backup
+*~
+
+# ==============================
+
+# Logs and temporary files
+
+# ==============================
+
+*.log
+*.tmp
+*.temp
+
+# ==============================
+
+# IDE and editor settings
+
+# ==============================
+
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ==============================
+
+# OS-generated files
+
+# ==============================
+
+.DS_Store
+Thumbs.db

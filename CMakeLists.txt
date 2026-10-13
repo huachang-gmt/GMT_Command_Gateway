@@ -12,6 +12,7 @@ add_executable(GMT_Command_Gateway
     src/usb_transport.cpp
     src/command_parser.cpp
     src/tcp_server.cpp
+    src/uds_client.cpp
 )
 
 target_include_directories(GMT_Command_Gateway PRIVATE

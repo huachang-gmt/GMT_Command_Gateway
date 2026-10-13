@@ -184,6 +184,63 @@ void TcpServer::run()
                   << std::endl;
 
 
+        // 之後命令變更從這邊修改 
+        //if (result.command == "STP" && response == ">Done\r\n")
+        if (result.command == "STP" && response.find("DONE") != std::string::npos) // 測試模擬
+        {
+            std::cout << "[UDS TX] SAVE_TRAJECTORY"
+                    << std::endl;
+
+            const UdsSaveResult uds_result = uds_.saveTrajectory();
+
+            switch (uds_result)
+            {
+            case UdsSaveResult::SAVE_OK:
+                std::cout << "[UDS RX] SAVE_OK"
+                        << std::endl;
+                break;
+
+            case UdsSaveResult::SAVE_ERROR:
+                std::cerr << "[UDS RX] SAVE_ERROR"
+                        << std::endl;
+                break;
+
+            case UdsSaveResult::CONNECT_ERROR:
+                std::cerr << "[UDS ERROR] Connection failed"
+                        << std::endl;
+                break;
+
+            case UdsSaveResult::SEND_ERROR:
+                std::cerr << "[UDS ERROR] Send failed"
+                        << std::endl;
+                break;
+
+            case UdsSaveResult::RECEIVE_ERROR:
+                std::cerr << "[UDS ERROR] Receive failed"
+                        << std::endl;
+                break;
+
+            case UdsSaveResult::TIMEOUT:
+                std::cerr << "[UDS ERROR] Timeout"
+                        << std::endl;
+                break;
+
+            case UdsSaveResult::INVALID_RESPONSE:
+                std::cerr << "[UDS ERROR] Invalid response"
+                        << std::endl;
+                break;
+            }
+        }
+
+
+
+
+
+
+
+
+
+
 
     }
 

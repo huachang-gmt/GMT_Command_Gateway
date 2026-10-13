@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include "usb_transport.hpp"
+#include "uds_client.hpp"
 
 class TcpServer
 {
@@ -19,6 +20,7 @@ private:
     int server_fd_;
     int client_fd_;
     UsbTransport usb_;
+    UdsClient uds_;
 };
 
 #endif // TCP_SERVER_H

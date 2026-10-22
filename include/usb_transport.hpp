@@ -6,6 +6,13 @@
 #include <vector>
 #include <cstddef>
 
+enum class UsbReceiveResult
+{
+    RESPONSE_RECEIVED,
+    TIMEOUT,
+    RECEIVE_ERROR
+};
+
 class UsbTransport {
 public:
     explicit UsbTransport(const std::string& device);
@@ -23,7 +30,7 @@ public:
         std::size_t bytesToSend
     );
 
-    bool receiveResponse(std::string& response);
+    UsbReceiveResult receiveResponse(std::string& response);
 
 private:
     std::string device_;

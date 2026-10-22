@@ -279,10 +279,10 @@ bool UsbTransport::sendCommandPartial(
 
 
 
-bool UsbTransport::receiveResponse(std::string& response)
+UsbReceiveResult UsbTransport::receiveResponse(std::string& response)
 {
     if (fd_ < 0) {
-        return false;
+        return UsbReceiveResult::RECEIVE_ERROR;
     }
 
     response.clear();
@@ -295,143 +295,223 @@ bool UsbTransport::receiveResponse(std::string& response)
 
     uint8_t readBuffer[READ_BUFFER_SIZE];
 
-    constexpr int RX_TIMEOUT_MS = 100U; //100;  // 暫時測試數值，袁術直視 100
+    /*
+    * Check whether the parser can make progress
+    * with the current rxBuffer.
+    *
+    * Only inspect the first MAGIC candidate,
+    * matching the existing packet parser.
+    */
+    auto hasCompletePacket = []() -> bool {
+
+        std::size_t magicIndex = 0U;
+
+        /*
+        * Find the first MAGIC = 0x47 0x4D.
+        */
+        while ((magicIndex + 1U) < rxBuffer.size()) {
+
+            if (rxBuffer[magicIndex] == MAGIC_BYTE_0 &&
+                rxBuffer[magicIndex + 1U] == MAGIC_BYTE_1) {
+                break;
+            }
+
+            ++magicIndex;
+        }
+
+        /*
+        * No complete MAGIC found.
+        *
+        * If at least two bytes exist, let the
+        * existing parser discard junk bytes or
+        * preserve a trailing possible MAGIC byte.
+        */
+        if ((magicIndex + 1U) >= rxBuffer.size()) {
+            return rxBuffer.size() >= 2U;
+        }
+
+        /*
+        * Need a complete header before
+        * reading the payload length.
+        */
+        if ((rxBuffer.size() - magicIndex) < HEADER_SIZE) {
+            return false;
+        }
+
+        const uint16_t payloadLength =
+            static_cast<uint16_t>(
+                static_cast<uint16_t>(
+                    rxBuffer[magicIndex + 6U]) |
+                (static_cast<uint16_t>(
+                    rxBuffer[magicIndex + 7U]) << 8U)
+            );
+
+        /*
+        * Let the existing parser handle
+        * invalid payload lengths.
+        */
+        if (payloadLength > MAX_PAYLOAD_SIZE) {
+            return true;
+        }
+
+        const std::size_t expectedLength =
+            HEADER_SIZE +
+            static_cast<std::size_t>(payloadLength) +
+            CRC_SIZE;
+
+        /*
+        * Do not skip an incomplete first packet
+        * to process a later packet.
+        */
+        return (rxBuffer.size() - magicIndex) >= expectedLength;
+    };
+
+
+    constexpr int USB_RESPONSE_TIMEOUT_MS = 3000U;
 
     auto lastRxTime = std::chrono::steady_clock::now();
 
     while (true) {
 
-        fd_set readfds;
-        FD_ZERO(&readfds);
-        FD_SET(fd_, &readfds);
 
-        const auto now =
-            std::chrono::steady_clock::now();
+    /*
+     * Read USB only when no complete packet
+     * is already available in rxBuffer.
+     */
+        if (!hasCompletePacket()) {
 
-        const auto elapsed =
-            std::chrono::duration_cast<
-                std::chrono::milliseconds
-            >(now - lastRxTime).count();
+            fd_set readfds;
+            FD_ZERO(&readfds);
+            FD_SET(fd_, &readfds);
 
-        const int remainingMs =
-            RX_TIMEOUT_MS -
-            static_cast<int>(elapsed);
+            const auto now =
+                std::chrono::steady_clock::now();
 
-        if (!rxBuffer.empty() &&
-            remainingMs <= 0) {
+            const auto elapsed =
+                std::chrono::duration_cast<
+                    std::chrono::milliseconds
+                >(now - lastRxTime).count();
 
-            std::cerr
-                << "[USB RX] ERROR: RX TIMEOUT - incomplete packet, received="
-                << rxBuffer.size()
-                << " bytes"
+            const int remainingMs =
+                USB_RESPONSE_TIMEOUT_MS -
+                static_cast<int>(elapsed);
+
+                                
+            if (remainingMs <= 0) {
+
+                if (!rxBuffer.empty()) {
+
+                    std::cerr
+                        << "[USB RX] ERROR: RX TIMEOUT - incomplete packet, received="
+                        << rxBuffer.size()
+                        << " bytes"
+                        << '\n';
+
+                    rxBuffer.clear();
+
+                    return UsbReceiveResult::RECEIVE_ERROR;
+                }
+
+                return UsbReceiveResult::TIMEOUT;
+            }
+
+            struct timeval timeout;
+
+            const int waitMs = remainingMs;
+
+            timeout.tv_sec = waitMs / 1000;
+            timeout.tv_usec = (waitMs % 1000) * 1000;
+
+            const int result = ::select(
+                fd_ + 1,
+                &readfds,
+                nullptr,
+                nullptr,
+                &timeout
+            );
+
+            if (result < 0) {
+
+                if (errno == EINTR) {
+                    continue;
+                }
+
+                return UsbReceiveResult::RECEIVE_ERROR;
+            }
+
+            if (result == 0) {
+
+                if (!rxBuffer.empty()) {
+
+                    std::cerr
+                        << "[USB RX] ERROR: RX TIMEOUT - incomplete packet, received="
+                        << rxBuffer.size()
+                        << " bytes"
+                        << '\n';
+
+                    rxBuffer.clear();
+
+                    return UsbReceiveResult::RECEIVE_ERROR;
+                }
+
+                return UsbReceiveResult::TIMEOUT;
+            }
+
+
+
+            const ssize_t received = ::read(
+                fd_,
+                readBuffer,
+                sizeof(readBuffer)
+            );
+
+            if (received < 0) {
+
+                if (errno == EINTR) {
+                    continue;
+                }
+
+                return UsbReceiveResult::RECEIVE_ERROR;
+            }
+
+            if (received == 0) {
+                return UsbReceiveResult::RECEIVE_ERROR;
+            }
+
+            /*
+            * USB CDC is a byte stream.
+            *
+            * One read() does not necessarily equal one
+            * transport packet.
+            */
+            rxBuffer.insert(
+                rxBuffer.end(),
+                readBuffer,
+                readBuffer + received
+            );
+
+            /*
+            * Print exactly what CM5 received.
+            */
+            std::cout
+                << "[USB RX] Len="
+                << received
                 << '\n';
 
-            rxBuffer.clear();
+            std::cout
+                << "[USB RX] HEX:";
 
-            return false;
-        }
-
-        struct timeval timeout;
-
-        const int waitMs =
-            (rxBuffer.empty())
-                ? RX_TIMEOUT_MS
-                : remainingMs;
-
-        timeout.tv_sec = waitMs / 1000;
-        timeout.tv_usec = (waitMs % 1000) * 1000;
-
-
-
-        const int result = ::select(
-            fd_ + 1,
-            &readfds,
-            nullptr,
-            nullptr,
-            &timeout
-        );
-
-        if (result < 0) {
-
-            if (errno == EINTR) {
-                continue;
+            for (ssize_t i = 0; i < received; ++i) {
+                std::printf(
+                    " %02X",
+                    readBuffer[i]
+                );
             }
 
-            return false;
-        }
+            std::printf("\n");
 
-        if (result == 0) {
+        } // end if (!hasCompletePacket())
 
-            if (!rxBuffer.empty()) {
-
-                std::cerr
-                    << "[USB RX] ERROR: RX TIMEOUT - incomplete packet, received="
-                    << rxBuffer.size()
-                    << " bytes"
-                    << '\n';
-
-                rxBuffer.clear();
-
-                return false;
-            }
-
-            return false;
-        }
-
-
-
-        const ssize_t received = ::read(
-            fd_,
-            readBuffer,
-            sizeof(readBuffer)
-        );
-
-        if (received < 0) {
-
-            if (errno == EINTR) {
-                continue;
-            }
-
-            return false;
-        }
-
-        if (received == 0) {
-            return false;
-        }
-
-        lastRxTime = std::chrono::steady_clock::now(); // 每次真的收到 USB 資料，就把 100 ms timeout 重新開始。
-
-        /*
-         * USB CDC is a byte stream.
-         *
-         * One read() does not necessarily equal one
-         * transport packet.
-         */
-        rxBuffer.insert(
-            rxBuffer.end(),
-            readBuffer,
-            readBuffer + received
-        );
-
-        /*
-         * Print exactly what CM5 received.
-         */
-        std::cout
-            << "[USB RX] Len="
-            << received
-            << '\n';
-
-        std::cout
-            << "[USB RX] HEX:";
-
-        for (ssize_t i = 0; i < received; ++i) {
-            std::printf(
-                " %02X",
-                readBuffer[i]
-            );
-        }
-
-        std::printf("\n");
 
         /*
          * Try to decode one or more complete packets
@@ -709,11 +789,11 @@ bool UsbTransport::receiveResponse(std::string& response)
                             << std::strerror(errno)
                             << '\n';
 
-                        return false;
+                        return UsbReceiveResult::RECEIVE_ERROR;
                     }
 
                     if (written == 0) {
-                        return false;
+                        return UsbReceiveResult::RECEIVE_ERROR;
                     }
 
                     totalWritten += static_cast<std::size_t>(written);
@@ -759,7 +839,7 @@ bool UsbTransport::receiveResponse(std::string& response)
                     rxBuffer.begin() + expectedLength
                 );
 
-                return true;
+                return UsbReceiveResult::RESPONSE_RECEIVED;
             }
 
             /*

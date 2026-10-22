@@ -742,3 +742,332 @@ ls: cannot access '/tmp/gmt_trajectory.sock': No such file or directory
 ![GMT_Command_Gateway-5](images/GMT_Command_Gateway-5.png)
 
 
+# [2026-10-22] 更新版本說明
+
+# GMT_Command_Gateway
+
+## 1. 專案簡介
+
+`GMT_Command_Gateway` 是一個運行於 Raspberry Pi CM5 的命令閘道程式，負責接收電腦端 Client 傳送的命令、透過 USB CDC 與 STM32 進行通訊，並將 STM32 回傳的 Response 依接收順序轉送至 Client。
+
+本階段的主要工作是完善多筆 Response 的接收與轉送流程，並依據指定命令及其最終 Response，決定是否觸發軌跡資料存檔。
+
+本專案採用 C++ 與 CMake 建置。
+
+### 系統架構
+
+```text
+┌──────────────────────────┐
+│       PC Qt Client       │
+└────────────┬─────────────┘
+             │ TCP
+             ▼
+┌──────────────────────────┐
+│   Raspberry Pi CM5       │
+│   GMT_Command_Gateway    │
+│                          │
+│  1. 接收 Client 命令     │
+│  2. 傳送命令至 STM32     │
+│  3. 接收多筆 Response    │
+│  4. 依序轉送至 Client    │
+│  5. 判斷軌跡存檔條件      │
+└────────────┬─────────────┘
+             │ USB CDC
+             ▼
+┌──────────────────────────┐
+│          STM32           │
+│   命令執行與 Response     │
+└──────────────────────────┘
+
+             Gateway
+                │
+                │ Unix Domain Socket
+                ▼
+┌──────────────────────────┐
+│      spi-master-test     │
+│      軌跡資料存檔         │
+└──────────────────────────┘
+```
+
+> 註：上述架構描述本階段的目標通訊流程。STM32 新版命令接收與 Response 傳送協定的整合及實機驗證仍待完成。
+
+---
+
+## 2. 本階段開發目標
+
+本階段主要完成以下工作：
+
+1. 改善 USB Response 接收機制，使 Gateway 能逐筆取得 Response。
+2. 保留 USB 接收緩衝區內尚未交付的後續封包。
+3. 依照 Response 的接收順序，逐筆轉送至 PC Client。
+4. 改善 TCP 傳送機制，處理部分資料傳送的情況。
+5. 將 Response 轉送與軌跡存檔判斷分離。
+6. 新增七個命令的軌跡存檔條件。
+7. 沿用既有 Unix Domain Socket（UDS）存檔介面。
+8. 確保 UDS 存檔結果不會取代或修改傳回 Client 的 STM32 Response。
+
+---
+
+## 3. Response 接收與轉送機制
+
+### 3.1 多筆 Response 處理
+
+對於具有多筆 Response 的命令，Gateway 逐筆接收完整 Response，並依照接收順序轉送給 Client。
+
+例如，某個命令可能依序產生：
+
+```text
+>MSV
+>Excute Result : NORMAL FINISHED
+>Done
+```
+
+Gateway 的預期處理順序如下：
+
+1. 接收第一筆 Response。
+2. 將第一筆 Response 傳送給 Client。
+3. 接收第二筆 Response。
+4. 將第二筆 Response 傳送給 Client。
+5. 接收最終 `>Done`。
+6. 將 `>Done` 傳送給 Client。
+7. 判斷命令是否符合軌跡存檔條件。
+8. 符合條件時，觸發一次軌跡存檔。
+
+執行結果可能是成功或失敗，均依照命令本身的存檔規則處理。
+
+### 3.2 USB 接收狀態
+
+USB Response 接收函式使用 `UsbReceiveResult` 區分以下狀態：
+
+| 狀態                  | 說明                 |
+| ------------------- | ------------------ |
+| `RESPONSE_RECEIVED` | 成功接收一筆完整 Response  |
+| `TIMEOUT`           | 等待期間未取得完整 Response |
+| `RECEIVE_ERROR`     | 發生接收錯誤，例如不完整封包逾時   |
+
+這種設計可以讓上層程式區分正常接收、等待逾時與接收錯誤。
+
+### 3.3 USB 接收緩衝區
+
+當一次 USB 讀取取得多筆資料時，接收緩衝區會保留尚未交付的後續封包，讓後續呼叫能繼續處理。
+
+此機制旨在避免只處理第一筆 Response，而忽略同一次讀取中已經收到的後續封包。
+
+### 3.4 TCP 傳送
+
+TCP 傳送已改為迴圈處理，持續傳送尚未完成的資料，直到整筆 Response 傳送完成或發生錯誤。
+
+程式亦處理 `EINTR`，避免因系統呼叫遭中斷就直接判定傳送失敗。
+
+### 3.5 Response 與存檔流程分離
+
+Gateway 必須先將收到的 Response 傳送給 Client，再判斷是否符合存檔條件。
+
+**UDS 存檔結果僅用於記錄存檔狀態，不得取代、修改或重新組成已傳送給 Client 的 STM32 Response。**
+
+---
+
+## 4. 軌跡存檔條件
+
+本階段已加入以下七個命令的存檔判斷。
+
+| 命令    | 說明        | 存檔條件               |
+| ----- | --------- | ------------------ |
+| `MOV` | 絕對位置移動    | 收到最終 `>Done` 時存檔一次 |
+| `MRV` | 相對位置移動    | 收到最終 `>Done` 時存檔一次 |
+| `MSV` | 單軸絕對位置移動  | 收到最終 `>Done` 時存檔一次 |
+| `MSR` | 單軸相對位置移動  | 收到最終 `>Done` 時存檔一次 |
+| `SSI` | 依指定通用規則處理 | 收到最終 `>Done` 時存檔一次 |
+| `SSP` | 依指定通用規則處理 | 收到最終 `>Done` 時存檔一次 |
+| `SLI` | 依指定通用規則處理 | 收到最終 `>Done` 時存檔一次 |
+
+### 4.1 MOV、MRV、MSV、MSR
+
+上述四個移動命令的文件指出，軌跡執行期間會回傳執行結果，最後再送出 `>Done`。
+
+執行結果可能包含：
+
+* `>Excute Result : NORMAL FINISHED`
+* `>Excute Result : ERR STOP`
+* `>Excute Result : ERR NOT ON TARGET`
+* `>Excute Result : ERR`
+* `>Excute Result : ERR OVER GAP SENSOR THRSHOLD`
+
+無論執行結果為成功或失敗，只要符合命令規則並收到最終 `>Done`，就觸發一次 `SAVE_TRAJECTORY`。
+
+中間的執行結果不會單獨觸發存檔。
+
+### 4.2 SSI、SSP、SLI
+
+這三個命令依照本階段指定的通用規則處理：
+
+* 命令為 `SSI`、`SSP` 或 `SLI`。
+* 該命令的 Response 流程收到最終 `>Done`。
+* 觸發一次軌跡存檔。
+
+這三個命令目前依指定規則實作，未額外推定其功能或其他存檔條件。
+
+### 4.3 命令獨立判斷
+
+每個命令均依據自己的命令識別與 Response 結束條件進行判斷。
+
+目前程式的設計原則是：
+
+1. 不因為收到任意一筆 Response 就觸發存檔。
+2. 不因為收到中間執行結果就提前觸發存檔。
+3. 符合命令條件且收到最終 `>Done` 時，觸發一次存檔。
+4. 其他 Response 照常傳送給 Client。
+5. UDS 存檔結果不改變 Client 收到的 Response。
+
+---
+
+## 5. UDS 軌跡存檔介面
+
+Gateway 沿用既有的 Unix Domain Socket 介面，與 `spi-master-test` 進行軌跡存檔協調。
+
+### 5.1 通訊設定
+
+| 項目        | 設定                         |
+| --------- | -------------------------- |
+| 通訊方式      | Unix Domain Socket         |
+| Socket 路徑 | `/tmp/gmt-trajectory.sock` |
+| 存檔命令      | `SAVE_TRAJECTORY\n`        |
+| 成功回應      | `SAVE_OK\n`                |
+| 失敗回應      | `SAVE_ERROR\n`             |
+
+### 5.2 存檔流程
+
+當命令符合存檔條件時：
+
+1. Gateway 傳送 `SAVE_TRAJECTORY\n`。
+2. `spi-master-test` 執行既有的軌跡存檔流程。
+3. 存檔端回傳成功或失敗結果。
+4. Gateway 記錄 UDS 存檔結果。
+
+UDS 介面維持既有協定，不因新增命令而改變。
+
+### 5.3 錯誤處理原則
+
+UDS 連線、傳送、接收或存檔失敗時，Gateway 應記錄相應狀態。
+
+存檔錯誤的處理不得取代或修改已經傳送給 Client 的 STM32 Response。
+
+---
+
+## 6. 建置環境與建置方式
+
+### 6.1 開發環境
+
+| 項目   | 說明                                 |
+| ---- | ---------------------------------- |
+| 執行平台 | Raspberry Pi CM5                   |
+| 程式語言 | C++                                |
+| 建置系統 | CMake                              |
+| 主要通訊 | TCP、USB CDC、Unix Domain Socket     |
+| 專案路徑 | `/home/herman/GMT_Command_Gateway` |
+
+### 6.2 建置指令
+
+進入專案目錄：
+
+```bash
+cd /home/herman/GMT_Command_Gateway
+```
+
+檢查 Git 差異格式：
+
+```bash
+git diff --check
+```
+
+建置專案：
+
+```bash
+cmake --build build -j$(nproc)
+```
+
+### 6.3 本階段建置結果
+
+本階段新增及調整存檔條件後，已再次執行 CMake Build，並確認建置通過。
+
+> Build 通過代表目前程式可成功建置，不等於新版 STM32 Response 協定的整合與實機驗證已完成。
+
+---
+
+## 7. 本階段完成項目
+
+* [x] 調整 USB Response 接收函式的回傳狀態。
+* [x] 保留尚未交付的後續封包。
+* [x] 改善 TCP 部分資料傳送處理。
+* [x] 建立多筆 Response 的逐筆接收與轉送流程。
+* [x] 將 Response 傳送與 UDS 存檔判斷分離。
+* [x] 加入 MOV 存檔條件。
+* [x] 加入 MRV 存檔條件。
+* [x] 加入 MSV 存檔條件。
+* [x] 加入 MSR 存檔條件。
+* [x] 加入 SSI 存檔條件。
+* [x] 加入 SSP 存檔條件。
+* [x] 加入 SLI 存檔條件。
+* [x] 沿用既有 UDS 存檔介面。
+* [x] 最新程式修改後 CMake Build 通過。
+
+---
+
+## 8. 尚待完成的工作
+
+以下項目尚未完成最終驗收。
+
+### 8.1 STM32 新版通訊協定整合
+
+STM32 端的命令接收與 Response 傳送協定尚待修改完成，之後才能使用預期的 USB 通訊流程進行完整驗證。
+
+### 8.2 多筆 Response 實機驗證
+
+待 STM32 新協定完成後，需要確認：
+
+* 多筆 Response 能正確接收。
+* Response 能依接收順序轉送至 Qt Client。
+* 中間執行結果不會造成提前終止。
+* 最終 `>Done` 能正確結束指定命令的接收流程。
+
+### 8.3 七個命令的存檔驗證
+
+待新協定整合完成後，需要逐一確認：
+
+* 七個命令均能正確辨識。
+* 各命令在最終 `>Done` 時只觸發一次存檔。
+* 成功與失敗的執行結果均符合指定規則。
+* UDS 存檔失敗不會改變 Client Response。
+
+### 8.4 其他命令的 Response 結束行為
+
+需要在最終程式檢視時確認，未列入七個存檔命令的其他命令，是否仍符合其原有的 Response 結束方式。
+
+---
+
+## 9. 重要設計原則
+
+本專案後續開發應遵守以下原則：
+
+1. **Response 完整性：** 不任意修改 STM32 Response 的內容。
+2. **Response 順序：** 按照接收順序轉送給 Client。
+3. **存檔獨立性：** 存檔判斷不得改變 Client 的 Response。
+4. **命令獨立性：** 各命令依照各自的存檔條件判斷。
+5. **避免重複存檔：** 同一命令流程符合條件時只觸發一次存檔。
+6. **維持既有介面：** 不任意變更 UDS Socket 路徑、命令或回應格式。
+7. **小步修改：** 後續修改應以最小變更為原則，並在每次修改後執行 Build 驗證。
+8. **實機驗收：** Build 通過不能取代實際硬體與通訊流程驗證。
+
+---
+
+## 10. 專案階段狀態
+
+**目前階段：Gateway 主要程式修改完成，Build PASS，等待 STM32 新版通訊協定整合與實機驗收。**
+
+目前已完成多筆 Response 處理機制及七個命令的存檔條件。下一階段將在 STM32 命令接收與 Response 傳送協定完成後，進行 Gateway 與 STM32 的整合測試，確認 Response 順序、命令終止條件及 UDS 存檔結果均符合預期。
+
+本階段尚未宣告完整實機驗收通過。
+
+
+
+

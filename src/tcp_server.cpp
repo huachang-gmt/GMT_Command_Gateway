@@ -4,7 +4,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
-
+#include <cstring>
 
 TcpServer::TcpServer()
     : server_fd_(-1),
@@ -153,40 +153,114 @@ void TcpServer::run()
         std::cout << "[USB TX] Command sent to STM32"
                   << std::endl;
 
+
         std::string response;
+        std::string latestResponse;
 
-        if (!usb_.receiveResponse(response))
-        {
-            std::cerr << "[ERROR] USB receiveResponse() failed."
-                      << std::endl;
-            continue;
+        while (true)
+        {     
+
+            const UsbReceiveResult rxResult =
+                usb_.receiveResponse(response);
+
+            if (rxResult != UsbReceiveResult::RESPONSE_RECEIVED)
+            {
+                if (rxResult == UsbReceiveResult::TIMEOUT)
+                {
+                    std::cerr
+                        << "[ERROR] USB receiveResponse() timeout."
+                        << std::endl;
+                }
+                else
+                {
+                    std::cerr
+                        << "[ERROR] USB receiveResponse() failed."
+                        << std::endl;
+                }
+
+                break;
+            }
+
+            std::cout << "[USB RX] Response received: "
+                      << response;
+
+            latestResponse = response;
+
+            response += "\r\n";
+
+            std::size_t totalSent = 0U;
+
+            while (totalSent < response.size())
+            {
+                const ssize_t sent = send(
+                    client_fd_,
+                    response.data() + totalSent,
+                    response.size() - totalSent,
+                    MSG_NOSIGNAL);
+
+                if (sent < 0)
+                {
+                    if (errno == EINTR)
+                    {
+                        continue;
+                    }
+
+                    std::cerr << "[ERROR] send() failed: "
+                            << std::strerror(errno)
+                            << std::endl;
+                    return;
+                }
+
+                if (sent == 0)
+                {
+                    std::cerr << "[ERROR] send() returned 0."
+                            << std::endl;
+                    return;
+                }
+
+                totalSent += static_cast<std::size_t>(sent);
+            }
+
+            std::cout << "[TCP TX] Response sent to client"
+                    << std::endl;
+
+
+
+            /*
+             * MOV-specific response termination.
+             * Other commands retain their existing behavior.
+             */
+
+
+            if ((result.command == "MOV" ||
+                result.command == "MRV" ||
+                result.command == "MSV" ||
+                result.command == "MSR" ||
+                result.command == "SSI" ||
+                result.command == "SSP" ||
+                result.command == "SLI") &&
+                (latestResponse == ">Done" ||
+                latestResponse == ">Done\r\n"))
+            {
+                break;
+            }
+
         }
 
-        std::cout << "[USB RX] Response received: "
-                  << response;
 
-        response += "\r\n";
-        
-        const ssize_t sent = send(
-            client_fd_,
-            response.c_str(),
-            response.size(),
-            0);
-
-        if (sent < 0)
-        {
-            std::cerr << "[ERROR] send() failed."
-                      << std::endl;
-            return;
-        }
-
-        std::cout << "[TCP TX] Response sent to client"
-                  << std::endl;
-
-
-        // 之後命令變更從這邊修改 
-        //if (result.command == "STP" && response == ">Done\r\n")
-        if (result.command == "STP" && response.find("DONE") != std::string::npos) // 測試模擬
+        /*
+        * Command-specific trajectory save conditions.
+        * Add additional command rules here in the future.
+        */
+        if ((result.command == "MOV" ||
+            result.command == "MRV" ||
+            result.command == "MSV" ||
+            result.command == "MSR" ||
+            result.command == "SSI" ||
+            result.command == "SSP" ||
+            result.command == "SLI") &&
+            (latestResponse == ">Done" ||
+            latestResponse == ">Done\r\n"))
         {
             std::cout << "[UDS TX] SAVE_TRAJECTORY"
                     << std::endl;
@@ -231,16 +305,6 @@ void TcpServer::run()
                 break;
             }
         }
-
-
-
-
-
-
-
-
-
-
 
     }
 

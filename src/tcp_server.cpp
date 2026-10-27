@@ -9,7 +9,7 @@
 TcpServer::TcpServer()
     : server_fd_(-1),
       client_fd_(-1),
-      usb_("/dev/ttyACM0")
+      usb_("/dev/serial/by-id/usb-STMicroelectronics_STM32_Virtual_ComPort_3069347A3332-if00")
 {
 }
 
@@ -73,14 +73,14 @@ bool TcpServer::start()
 
     if (!usb_.open())
     {
-        std::cerr << "[ERROR] Failed to open USB device: /dev/ttyACM0"
+        std::cerr << "[ERROR] Failed to open USB device: /dev/ttyACM1"
                 << std::endl;
         close(client_fd_);
         client_fd_ = -1;
         return false;
     }
 
-    std::cout << "[OK] USB device opened: /dev/ttyACM0"
+    std::cout << "[OK] USB device opened: /dev/ttyACM1"
             << std::endl;
 
     return true;
@@ -241,6 +241,15 @@ void TcpServer::run()
                 result.command == "SLI") &&
                 (latestResponse == ">Done" ||
                 latestResponse == ">Done\r\n"))
+            {
+                break;
+            }
+
+            /*
+            * Any command ends its response session when ">Done" is received.
+            */
+            if (latestResponse == ">Done" ||
+                latestResponse == ">Done\r\n")
             {
                 break;
             }

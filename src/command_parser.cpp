@@ -113,6 +113,8 @@ static const CommandRule COMMAND_RULES[] =
     {"SSI", REGEX_NO_PARAMETER}, 
     {"SSP", REGEX_NO_PARAMETER}, 
     {"SLI", REGEX_NO_PARAMETER},
+    {"DBG", REGEX_NO_PARAMETER},
+    {"APOS?", REGEX_NO_PARAMETER},
     {"MPV",   REGEX_MPV},
     {"MPR",   REGEX_MPR},
     {"MOV?",  REGEX_NO_PARAMETER},
